@@ -7,12 +7,22 @@ A股自选股智能分析系统 - 通知层
 职责：
 1. 汇总分析结果生成日报
 2. 支持 Markdown 格式输出
-3. 推送到企业微信 Webhook
+3. 多渠道推送（自动识别）：
+   - 企业微信 Webhook
+   - 飞书 Webhook
+   - Telegram Bot
+   - 邮件 SMTP
 """
 
 import logging
+import smtplib
+import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.header import Header
+from enum import Enum
 
 import requests
 
@@ -22,31 +32,157 @@ from analyzer import AnalysisResult
 logger = logging.getLogger(__name__)
 
 
+class NotificationChannel(Enum):
+    """通知渠道类型"""
+    WECHAT = "wechat"      # 企业微信
+    FEISHU = "feishu"      # 飞书
+    TELEGRAM = "telegram"  # Telegram
+    EMAIL = "email"        # 邮件
+    UNKNOWN = "unknown"    # 未知
+
+
+# SMTP 服务器配置（自动识别）
+SMTP_CONFIGS = {
+    # QQ邮箱
+    "qq.com": {"server": "smtp.qq.com", "port": 465, "ssl": True},
+    # 网易邮箱
+    "163.com": {"server": "smtp.163.com", "port": 465, "ssl": True},
+    "126.com": {"server": "smtp.126.com", "port": 465, "ssl": True},
+    # Gmail
+    "gmail.com": {"server": "smtp.gmail.com", "port": 587, "ssl": False},
+    # Outlook
+    "outlook.com": {"server": "smtp-mail.outlook.com", "port": 587, "ssl": False},
+    "hotmail.com": {"server": "smtp-mail.outlook.com", "port": 587, "ssl": False},
+    "live.com": {"server": "smtp-mail.outlook.com", "port": 587, "ssl": False},
+    # 新浪
+    "sina.com": {"server": "smtp.sina.com", "port": 465, "ssl": True},
+    # 搜狐
+    "sohu.com": {"server": "smtp.sohu.com", "port": 465, "ssl": True},
+    # 阿里云
+    "aliyun.com": {"server": "smtp.aliyun.com", "port": 465, "ssl": True},
+    # 139邮箱
+    "139.com": {"server": "smtp.139.com", "port": 465, "ssl": True},
+}
+
+
+class ChannelDetector:
+    """
+    渠道检测器 - 简化版
+    
+    根据配置直接判断渠道类型（不再需要 URL 解析）
+    """
+    
+    @staticmethod
+    def get_channel_name(channel: NotificationChannel) -> str:
+        """获取渠道中文名称"""
+        names = {
+            NotificationChannel.WECHAT: "企业微信",
+            NotificationChannel.FEISHU: "飞书",
+            NotificationChannel.TELEGRAM: "Telegram",
+            NotificationChannel.EMAIL: "邮件",
+            NotificationChannel.UNKNOWN: "未知渠道",
+        }
+        return names.get(channel, "未知渠道")
+
+
 class NotificationService:
     """
     通知服务
     
     职责：
     1. 生成 Markdown 格式的分析日报
-    2. 推送消息到企业微信机器人
+    2. 向所有已配置的渠道推送消息（多渠道并发）
     3. 支持本地保存日报
+    
+    支持的渠道：
+    - 企业微信 Webhook
+    - 飞书 Webhook
+    - Telegram Bot
+    - 邮件 SMTP
+    
+    注意：所有已配置的渠道都会收到推送
     """
     
-    def __init__(self, webhook_url: Optional[str] = None):
+    def __init__(self):
         """
         初始化通知服务
         
-        Args:
-            webhook_url: 企业微信 Webhook URL（可选，默认从配置读取）
+        检测所有已配置的渠道，推送时会向所有渠道发送
         """
-        self._webhook_url = webhook_url or get_config().wechat_webhook_url
+        config = get_config()
         
-        if not self._webhook_url:
-            logger.warning("企业微信 Webhook URL 未配置，将不发送推送通知")
+        # 各渠道的 Webhook URL
+        self._wechat_url = config.wechat_webhook_url
+        self._feishu_url = getattr(config, 'feishu_webhook_url', None)
+        
+        # Telegram 配置
+        self._telegram_config = {
+            'bot_token': getattr(config, 'telegram_bot_token', None),
+            'chat_id': getattr(config, 'telegram_chat_id', None),
+        }
+        
+        # 邮件配置
+        self._email_config = {
+            'sender': config.email_sender,
+            'password': config.email_password,
+            'receivers': config.email_receivers or ([config.email_sender] if config.email_sender else []),
+        }
+        
+        # 检测所有已配置的渠道
+        self._available_channels = self._detect_all_channels()
+        
+        if not self._available_channels:
+            logger.warning("未配置有效的通知渠道，将不发送推送通知")
+        else:
+            channel_names = [ChannelDetector.get_channel_name(ch) for ch in self._available_channels]
+            logger.info(f"已配置 {len(self._available_channels)} 个通知渠道：{', '.join(channel_names)}")
+    
+    def _detect_all_channels(self) -> List[NotificationChannel]:
+        """
+        检测所有已配置的渠道
+        
+        Returns:
+            已配置的渠道列表
+        """
+        channels = []
+        
+        # 企业微信
+        if self._wechat_url:
+            channels.append(NotificationChannel.WECHAT)
+        
+        # 飞书
+        if self._feishu_url:
+            channels.append(NotificationChannel.FEISHU)
+        
+        # Telegram
+        if self._is_telegram_configured():
+            channels.append(NotificationChannel.TELEGRAM)
+        
+        # 邮件
+        if self._is_email_configured():
+            channels.append(NotificationChannel.EMAIL)
+        
+        return channels
+    
+    def _is_telegram_configured(self) -> bool:
+        """检查 Telegram 配置是否完整"""
+        return bool(self._telegram_config['bot_token'] and self._telegram_config['chat_id'])
+    
+    def _is_email_configured(self) -> bool:
+        """检查邮件配置是否完整（只需邮箱和授权码）"""
+        return bool(self._email_config['sender'] and self._email_config['password'])
     
     def is_available(self) -> bool:
-        """检查通知服务是否可用"""
-        return bool(self._webhook_url)
+        """检查通知服务是否可用（至少有一个渠道）"""
+        return len(self._available_channels) > 0
+    
+    def get_available_channels(self) -> List[NotificationChannel]:
+        """获取所有已配置的渠道"""
+        return self._available_channels
+    
+    def get_channel_names(self) -> str:
+        """获取所有已配置渠道的名称"""
+        return ', '.join([ChannelDetector.get_channel_name(ch) for ch in self._available_channels])
     
     def generate_daily_report(
         self, 
@@ -761,7 +897,7 @@ class NotificationService:
         Returns:
             是否发送成功
         """
-        if not self.is_available():
+        if not self._wechat_url:
             logger.warning("企业微信 Webhook 未配置，跳过推送")
             return False
         
@@ -771,13 +907,13 @@ class NotificationService:
             content = content[:3950] + "\n\n...(内容过长已截断，详见完整报告)"
         
         try:
-            return self._send_single_message(content)
+            return self._send_wechat_message(content)
         except Exception as e:
             logger.error(f"发送企业微信消息失败: {e}")
             return False
     
-    def _send_single_message(self, content: str) -> bool:
-        """发送单条消息"""
+    def _send_wechat_message(self, content: str) -> bool:
+        """发送企业微信消息"""
         payload = {
             "msgtype": "markdown",
             "markdown": {
@@ -786,7 +922,7 @@ class NotificationService:
         }
         
         response = requests.post(
-            self._webhook_url,
+            self._wechat_url,
             json=payload,
             timeout=10
         )
@@ -802,6 +938,418 @@ class NotificationService:
         else:
             logger.error(f"企业微信请求失败: {response.status_code}")
             return False
+    
+    def send_to_feishu(self, content: str) -> bool:
+        """
+        推送消息到飞书机器人
+        
+        飞书自定义机器人 Webhook 消息格式：
+        {
+            "msg_type": "text",
+            "content": {
+                "text": "文本内容"
+            }
+        }
+        
+        注意：飞书文本消息无严格长度限制，但建议控制在合理范围
+        
+        Args:
+            content: 消息内容（Markdown 会转为纯文本）
+            
+        Returns:
+            是否发送成功
+        """
+        if not self._feishu_url:
+            logger.warning("飞书 Webhook 未配置，跳过推送")
+            return False
+        
+        try:
+            # 飞书自定义机器人的消息格式
+            # 支持 text 和 post（富文本）两种类型
+            # 使用 post 富文本可以支持更好的格式显示
+            
+            # 将 Markdown 转换为飞书 post 格式
+            # 简化处理：使用 text 类型，保持原有格式
+            payload = {
+                "msg_type": "text",
+                "content": {
+                    "text": content
+                }
+            }
+            
+            logger.debug(f"飞书请求 URL: {self._feishu_url}")
+            logger.debug(f"飞书请求 payload: {payload}")
+            
+            response = requests.post(
+                self._feishu_url,
+                json=payload,
+                timeout=10
+            )
+            
+            logger.debug(f"飞书响应状态码: {response.status_code}")
+            logger.debug(f"飞书响应内容: {response.text}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                # 飞书成功响应：
+                # - 新版: {"code": 0, "msg": "success"}
+                # - 旧版: {"StatusCode": 0, "StatusMessage": "success"}
+                code = result.get('code') if 'code' in result else result.get('StatusCode')
+                if code == 0:
+                    logger.info("飞书消息发送成功")
+                    return True
+                else:
+                    error_msg = result.get('msg') or result.get('StatusMessage', '未知错误')
+                    error_code = result.get('code') or result.get('StatusCode', 'N/A')
+                    logger.error(f"飞书返回错误 [code={error_code}]: {error_msg}")
+                    logger.error(f"完整响应: {result}")
+                    return False
+            else:
+                logger.error(f"飞书请求失败: HTTP {response.status_code}")
+                logger.error(f"响应内容: {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"发送飞书消息失败: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return False
+    
+    def send_to_email(self, content: str, subject: Optional[str] = None) -> bool:
+        """
+        通过 SMTP 发送邮件（自动识别 SMTP 服务器）
+        
+        Args:
+            content: 邮件内容（支持 Markdown，会转换为 HTML）
+            subject: 邮件主题（可选，默认自动生成）
+            
+        Returns:
+            是否发送成功
+        """
+        if not self._is_email_configured():
+            logger.warning("邮件配置不完整，跳过推送")
+            return False
+        
+        sender = self._email_config['sender']
+        password = self._email_config['password']
+        receivers = self._email_config['receivers']
+        
+        try:
+            # 生成主题
+            if subject is None:
+                date_str = datetime.now().strftime('%Y-%m-%d')
+                subject = f"📈 A股智能分析报告 - {date_str}"
+            
+            # 将 Markdown 转换为简单 HTML
+            html_content = self._markdown_to_html(content)
+            
+            # 构建邮件
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = Header(subject, 'utf-8')
+            msg['From'] = sender
+            msg['To'] = ', '.join(receivers)
+            
+            # 添加纯文本和 HTML 两个版本
+            text_part = MIMEText(content, 'plain', 'utf-8')
+            html_part = MIMEText(html_content, 'html', 'utf-8')
+            msg.attach(text_part)
+            msg.attach(html_part)
+            
+            # 自动识别 SMTP 配置
+            domain = sender.split('@')[-1].lower()
+            smtp_config = SMTP_CONFIGS.get(domain)
+            
+            if smtp_config:
+                smtp_server = smtp_config['server']
+                smtp_port = smtp_config['port']
+                use_ssl = smtp_config['ssl']
+                logger.info(f"自动识别邮箱类型: {domain} -> {smtp_server}:{smtp_port}")
+            else:
+                # 未知邮箱，尝试通用配置
+                smtp_server = f"smtp.{domain}"
+                smtp_port = 465
+                use_ssl = True
+                logger.warning(f"未知邮箱类型 {domain}，尝试通用配置: {smtp_server}:{smtp_port}")
+            
+            # 根据配置选择连接方式
+            if use_ssl:
+                # SSL 连接（端口 465）
+                server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
+            else:
+                # TLS 连接（端口 587）
+                server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+                server.starttls()
+            
+            server.login(sender, password)
+            server.send_message(msg)
+            server.quit()
+            
+            logger.info(f"邮件发送成功，收件人: {receivers}")
+            return True
+            
+        except smtplib.SMTPAuthenticationError:
+            logger.error("邮件发送失败：认证错误，请检查邮箱和授权码是否正确")
+            return False
+        except smtplib.SMTPConnectError as e:
+            logger.error(f"邮件发送失败：无法连接 SMTP 服务器 - {e}")
+            return False
+        except Exception as e:
+            logger.error(f"发送邮件失败: {e}")
+            return False
+    
+    def _markdown_to_html(self, markdown_text: str) -> str:
+        """
+        将 Markdown 转换为简单的 HTML
+        
+        支持：标题、加粗、列表、分隔线
+        """
+        html = markdown_text
+        
+        # 转义 HTML 特殊字符
+        html = html.replace('&', '&amp;')
+        html = html.replace('<', '&lt;')
+        html = html.replace('>', '&gt;')
+        
+        # 标题 (# ## ###)
+        html = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+        html = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
+        html = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
+        
+        # 加粗 **text**
+        html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html)
+        
+        # 斜体 *text*
+        html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', html)
+        
+        # 分隔线 ---
+        html = re.sub(r'^---$', r'<hr>', html, flags=re.MULTILINE)
+        
+        # 列表项 - item
+        html = re.sub(r'^- (.+)$', r'<li>\1</li>', html, flags=re.MULTILINE)
+        
+        # 引用 > text
+        html = re.sub(r'^&gt; (.+)$', r'<blockquote>\1</blockquote>', html, flags=re.MULTILINE)
+        
+        # 换行
+        html = html.replace('\n', '<br>\n')
+        
+        # 包装 HTML
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }}
+                h1, h2, h3 {{ color: #333; }}
+                hr {{ border: none; border-top: 1px solid #ddd; margin: 20px 0; }}
+                blockquote {{ border-left: 4px solid #ddd; padding-left: 16px; color: #666; }}
+                li {{ margin: 4px 0; }}
+            </style>
+        </head>
+        <body>
+            {html}
+        </body>
+        </html>
+        """
+    
+    def send_to_telegram(self, content: str) -> bool:
+        """
+        推送消息到 Telegram 机器人
+        
+        Telegram Bot API 格式：
+        POST https://api.telegram.org/bot<token>/sendMessage
+        {
+            "chat_id": "xxx",
+            "text": "消息内容",
+            "parse_mode": "Markdown"
+        }
+        
+        Args:
+            content: 消息内容（Markdown 格式）
+            
+        Returns:
+            是否发送成功
+        """
+        if not self._is_telegram_configured():
+            logger.warning("Telegram 配置不完整，跳过推送")
+            return False
+        
+        bot_token = self._telegram_config['bot_token']
+        chat_id = self._telegram_config['chat_id']
+        
+        try:
+            # Telegram API 端点
+            api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            
+            # Telegram 消息最大长度 4096 字符
+            max_length = 4096
+            
+            if len(content) <= max_length:
+                # 单条消息发送
+                return self._send_telegram_message(api_url, chat_id, content)
+            else:
+                # 分段发送长消息
+                return self._send_telegram_chunked(api_url, chat_id, content, max_length)
+                
+        except Exception as e:
+            logger.error(f"发送 Telegram 消息失败: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return False
+    
+    def _send_telegram_message(self, api_url: str, chat_id: str, text: str) -> bool:
+        """发送单条 Telegram 消息"""
+        # 转换 Markdown 为 Telegram 支持的格式
+        # Telegram 的 Markdown 格式稍有不同，做简单处理
+        telegram_text = self._convert_to_telegram_markdown(text)
+        
+        payload = {
+            "chat_id": chat_id,
+            "text": telegram_text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+        
+        response = requests.post(api_url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('ok'):
+                logger.info("Telegram 消息发送成功")
+                return True
+            else:
+                error_desc = result.get('description', '未知错误')
+                logger.error(f"Telegram 返回错误: {error_desc}")
+                
+                # 如果 Markdown 解析失败，尝试纯文本发送
+                if 'parse' in error_desc.lower() or 'markdown' in error_desc.lower():
+                    logger.info("尝试使用纯文本格式重新发送...")
+                    payload['parse_mode'] = None
+                    payload['text'] = text  # 使用原始文本
+                    del payload['parse_mode']
+                    
+                    response = requests.post(api_url, json=payload, timeout=10)
+                    if response.status_code == 200 and response.json().get('ok'):
+                        logger.info("Telegram 消息发送成功（纯文本）")
+                        return True
+                
+                return False
+        else:
+            logger.error(f"Telegram 请求失败: HTTP {response.status_code}")
+            logger.error(f"响应内容: {response.text}")
+            return False
+    
+    def _send_telegram_chunked(self, api_url: str, chat_id: str, content: str, max_length: int) -> bool:
+        """分段发送长 Telegram 消息"""
+        # 按段落分割
+        sections = content.split("\n---\n")
+        
+        current_chunk = []
+        current_length = 0
+        all_success = True
+        chunk_index = 1
+        
+        for section in sections:
+            section_length = len(section) + 5  # +5 for "\n---\n"
+            
+            if current_length + section_length > max_length:
+                # 发送当前块
+                if current_chunk:
+                    chunk_content = "\n---\n".join(current_chunk)
+                    logger.info(f"发送 Telegram 消息块 {chunk_index}...")
+                    if not self._send_telegram_message(api_url, chat_id, chunk_content):
+                        all_success = False
+                    chunk_index += 1
+                
+                # 重置
+                current_chunk = [section]
+                current_length = section_length
+            else:
+                current_chunk.append(section)
+                current_length += section_length
+        
+        # 发送最后一块
+        if current_chunk:
+            chunk_content = "\n---\n".join(current_chunk)
+            logger.info(f"发送 Telegram 消息块 {chunk_index}（最后）...")
+            if not self._send_telegram_message(api_url, chat_id, chunk_content):
+                all_success = False
+        
+        return all_success
+    
+    def _convert_to_telegram_markdown(self, text: str) -> str:
+        """
+        将标准 Markdown 转换为 Telegram 支持的格式
+        
+        Telegram Markdown 限制：
+        - 不支持 # 标题
+        - 使用 *bold* 而非 **bold**
+        - 使用 _italic_ 
+        """
+        result = text
+        
+        # 移除 # 标题标记（Telegram 不支持）
+        result = re.sub(r'^#{1,6}\s+', '', result, flags=re.MULTILINE)
+        
+        # 转换 **bold** 为 *bold*
+        result = re.sub(r'\*\*(.+?)\*\*', r'*\1*', result)
+        
+        # 转义特殊字符（Telegram Markdown 需要）
+        # 注意：不转义已经用于格式的 * _ `
+        for char in ['[', ']', '(', ')']:
+            result = result.replace(char, f'\\{char}')
+        
+        return result
+    
+    def send(self, content: str) -> bool:
+        """
+        统一发送接口 - 向所有已配置的渠道发送
+        
+        遍历所有已配置的渠道，逐一发送消息
+        
+        Args:
+            content: 消息内容（Markdown 格式）
+            
+        Returns:
+            是否至少有一个渠道发送成功
+        """
+        if not self.is_available():
+            logger.warning("通知服务不可用，跳过推送")
+            return False
+        
+        channel_names = self.get_channel_names()
+        logger.info(f"正在向 {len(self._available_channels)} 个渠道发送通知：{channel_names}")
+        
+        success_count = 0
+        fail_count = 0
+        
+        for channel in self._available_channels:
+            channel_name = ChannelDetector.get_channel_name(channel)
+            try:
+                if channel == NotificationChannel.WECHAT:
+                    result = self.send_to_wechat(content)
+                elif channel == NotificationChannel.FEISHU:
+                    result = self.send_to_feishu(content)
+                elif channel == NotificationChannel.TELEGRAM:
+                    result = self.send_to_telegram(content)
+                elif channel == NotificationChannel.EMAIL:
+                    result = self.send_to_email(content)
+                else:
+                    logger.warning(f"不支持的通知渠道: {channel}")
+                    result = False
+                
+                if result:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                    
+            except Exception as e:
+                logger.error(f"{channel_name} 发送失败: {e}")
+                fail_count += 1
+        
+        logger.info(f"通知发送完成：成功 {success_count} 个，失败 {fail_count} 个")
+        return success_count > 0
     
     def _send_chunked_messages(self, content: str, max_length: int) -> bool:
         """
@@ -826,7 +1374,7 @@ class NotificationService:
                 if current_chunk:
                     chunk_content = "\n---\n".join(current_chunk)
                     logger.info(f"发送消息块 {chunk_index}...")
-                    if not self._send_single_message(chunk_content):
+                    if not self.send(chunk_content):
                         all_success = False
                     chunk_index += 1
                 
@@ -841,7 +1389,7 @@ class NotificationService:
         if current_chunk:
             chunk_content = "\n---\n".join(current_chunk)
             logger.info(f"发送消息块 {chunk_index}（最后）...")
-            if not self._send_single_message(chunk_content):
+            if not self.send(chunk_content):
                 all_success = False
         
         return all_success
@@ -937,7 +1485,7 @@ def send_daily_report(results: List[AnalysisResult]) -> bool:
     """
     发送每日报告的快捷方式
     
-    自动生成报告并推送到企业微信
+    自动识别渠道并推送
     """
     service = get_notification_service()
     
@@ -947,8 +1495,8 @@ def send_daily_report(results: List[AnalysisResult]) -> bool:
     # 保存到本地
     service.save_report_to_file(report)
     
-    # 推送到企业微信
-    return service.send_to_wechat(report)
+    # 推送到配置的渠道（自动识别）
+    return service.send(report)
 
 
 if __name__ == "__main__":
@@ -991,8 +1539,14 @@ if __name__ == "__main__":
     
     service = NotificationService()
     
+    # 显示检测到的渠道
+    print(f"=== 通知渠道检测 ===")
+    print(f"当前渠道: {service.get_channel_name()}")
+    print(f"渠道类型: {service.get_channel()}")
+    print(f"服务可用: {service.is_available()}")
+    
     # 生成日报
-    print("=== 生成日报测试 ===")
+    print("\n=== 生成日报测试 ===")
     report = service.generate_daily_report(test_results)
     print(report)
     
@@ -1001,10 +1555,10 @@ if __name__ == "__main__":
     filepath = service.save_report_to_file(report)
     print(f"保存成功: {filepath}")
     
-    # 推送测试（仅当配置了 Webhook 时）
+    # 推送测试
     if service.is_available():
-        print("\n=== 推送测试 ===")
-        success = service.send_to_wechat(report)
+        print(f"\n=== 推送测试（{service.get_channel_name()}）===")
+        success = service.send(report)
         print(f"推送结果: {'成功' if success else '失败'}")
     else:
-        print("\n企业微信 Webhook 未配置，跳过推送测试")
+        print("\n通知渠道未配置，跳过推送测试")

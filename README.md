@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Ready-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
 
-> 🤖 基于 AI 大模型的 A 股自选股智能分析系统，每日自动分析并推送「决策仪表盘」到企业微信/钉钉/飞书
+> 🤖 基于 AI 大模型的 A 股自选股智能分析系统，每日自动分析并推送「决策仪表盘」到企业微信/飞书/Telegram/邮箱
 
 ![运行效果演示](./sources/2026-01-10_155341_daily_analysis.gif)
 
@@ -15,7 +15,7 @@
 - **AI 决策仪表盘** - 一句话核心结论 + 精确买卖点位 + 检查清单
 - **多维度分析** - 技术面 + 筹码分布 + 舆情情报 + 实时行情
 - **大盘复盘** - 每日市场概览、板块涨跌、北向资金
-- **定时推送** - 支持企业微信机器人自动推送
+- **多渠道推送** - 支持企业微信、飞书、Telegram、邮件（自动识别）
 - **零成本部署** - GitHub Actions 免费运行，无需服务器
 - **💰 白嫖 Gemini API** - Google AI Studio 提供免费额度，个人使用完全够用
 - **🔄 多模型支持** - 支持 OpenAI 兼容 API（DeepSeek、通义千问等）作为备选
@@ -47,19 +47,38 @@
 
 进入你 Fork 的仓库 → `Settings` → `Secrets and variables` → `Actions` → `New repository secret`
 
+**AI 模型配置（二选一）**
+
 | Secret 名称 | 说明 | 必填 |
 |------------|------|:----:|
-| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) 获取 | ✅* |
-| `WECHAT_WEBHOOK_URL` | 企业微信机器人 Webhook | ✅ |
+| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) 获取免费 Key | ✅* |
+| `OPENAI_API_KEY` | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等） | 可选 |
+| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址（如 `https://api.deepseek.com/v1`） | 可选 |
+| `OPENAI_MODEL` | 模型名称（如 `deepseek-chat`） | 可选 |
+
+> *注：`GEMINI_API_KEY` 和 `OPENAI_API_KEY` 至少配置一个
+
+**通知渠道配置（可同时配置多个，全部推送）**
+
+| Secret 名称 | 说明 | 必填 |
+|------------|------|:----:|
+| `WECHAT_WEBHOOK_URL` | 企业微信 Webhook URL | 可选 |
+| `FEISHU_WEBHOOK_URL` | 飞书 Webhook URL | 可选 |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token（@BotFather 获取） | 可选 |
+| `TELEGRAM_CHAT_ID` | Telegram Chat ID | 可选 |
+| `EMAIL_SENDER` | 发件人邮箱（如 `xxx@qq.com`） | 可选 |
+| `EMAIL_PASSWORD` | 邮箱授权码（非登录密码） | 可选 |
+| `EMAIL_RECEIVERS` | 收件人邮箱（留空则发给自己） | 可选 |
+
+> *注：至少配置一个渠道，配置多个则同时推送到所有渠道
+
+**其他配置**
+
+| Secret 名称 | 说明 | 必填 |
+|------------|------|:----:|
 | `STOCK_LIST` | 自选股代码，如 `600519,300750,002594` | ✅ |
 | `TAVILY_API_KEYS` | [Tavily](https://tavily.com/) 搜索 API（新闻搜索） | 推荐 |
-| `SERPAPI_API_KEYS` | [SerpAPI](https://serpapi.com/) Key | 可选 |
 | `TUSHARE_TOKEN` | [Tushare Pro](https://tushare.pro/) Token | 可选 |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key（备选） | 可选 |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | 可选 |
-| `OPENAI_MODEL` | OpenAI 兼容模型名称 | 可选 |
-
-> *注：`GEMINI_API_KEY` 和 `OPENAI_API_KEY` 至少配置一个，系统优先使用 Gemini
 
 #### 3. 启用 Actions
 
@@ -208,22 +227,25 @@ daily_stock_analysis/
 
 ### 🔔 通知渠道扩展
 - [x] 企业微信机器人
+- [x] 飞书机器人
+- [x] Telegram Bot
+- [x] 邮件通知（SMTP）
 - [ ] 钉钉机器人
-- [ ] 飞书机器人
-- [ ] Telegram Bot
 - [ ] Discord Webhook
 - [ ] Slack Webhook
-- [ ] 邮件通知
 - [ ] iOS/Android 推送（Bark/Pushover）
 
 ### 🤖 AI 模型支持
-- [x] Google Gemini
-- [ ] OpenAI GPT-4
+- [x] Google Gemini（主力，免费额度）
+- [x] OpenAI 兼容 API（支持以下模型）
+  - [x] OpenAI GPT-4/4o
+  - [x] DeepSeek
+  - [x] 通义千问
+  - [x] Moonshot（月之暗面）
+  - [x] 智谱 GLM
 - [ ] Claude
-- [ ] 通义千问
 - [ ] 文心一言
-- [ ] DeepSeek
-- [ ] 本地模型（Ollama）
+- [x] 本地模型（Ollama）
 
 ### 📊 数据源扩展
 - [x] AkShare（免费）

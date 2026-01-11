@@ -53,8 +53,22 @@ class Config:
     tavily_api_keys: List[str] = field(default_factory=list)  # Tavily API Keys
     serpapi_keys: List[str] = field(default_factory=list)  # SerpAPI Keys
     
-    # === 通知配置 ===
+    # === 通知配置（可同时配置多个，全部推送）===
+    
+    # 企业微信 Webhook
     wechat_webhook_url: Optional[str] = None
+    
+    # 飞书 Webhook
+    feishu_webhook_url: Optional[str] = None
+    
+    # Telegram 配置（需要同时配置 Bot Token 和 Chat ID）
+    telegram_bot_token: Optional[str] = None  # Bot Token（@BotFather 获取）
+    telegram_chat_id: Optional[str] = None  # Chat ID
+    
+    # 邮件配置（只需邮箱和授权码，SMTP 自动识别）
+    email_sender: Optional[str] = None  # 发件人邮箱
+    email_password: Optional[str] = None  # 邮箱密码/授权码
+    email_receivers: List[str] = field(default_factory=list)  # 收件人列表（留空则发给自己）
     
     # === 数据库配置 ===
     database_path: str = "./data/stock_analysis.db"
@@ -150,6 +164,12 @@ class Config:
             tavily_api_keys=tavily_api_keys,
             serpapi_keys=serpapi_keys,
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
+            feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
+            telegram_bot_token=os.getenv('TELEGRAM_BOT_TOKEN'),
+            telegram_chat_id=os.getenv('TELEGRAM_CHAT_ID'),
+            email_sender=os.getenv('EMAIL_SENDER'),
+            email_password=os.getenv('EMAIL_PASSWORD'),
+            email_receivers=[r.strip() for r in os.getenv('EMAIL_RECEIVERS', '').split(',') if r.strip()],
             database_path=os.getenv('DATABASE_PATH', './data/stock_analysis.db'),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
@@ -188,8 +208,15 @@ class Config:
         if not self.tavily_api_keys and not self.serpapi_keys:
             warnings.append("提示：未配置搜索引擎 API Key (Tavily/SerpAPI)，新闻搜索功能将不可用")
         
-        if not self.wechat_webhook_url:
-            warnings.append("提示：未配置企业微信 Webhook，将不发送推送通知")
+        # 检查通知配置
+        has_notification = (
+            self.wechat_webhook_url or 
+            self.feishu_webhook_url or
+            (self.telegram_bot_token and self.telegram_chat_id) or
+            (self.email_sender and self.email_password)
+        )
+        if not has_notification:
+            warnings.append("提示：未配置通知渠道，将不发送推送通知")
         
         return warnings
     

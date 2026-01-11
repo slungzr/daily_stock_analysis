@@ -574,20 +574,20 @@ class StockAnalysisPipeline:
             filepath = self.notifier.save_report_to_file(report)
             logger.info(f"决策仪表盘日报已保存: {filepath}")
             
-            # 推送到企业微信（使用精简版决策仪表盘）
+            # 推送通知
             if self.notifier.is_available():
-                # 生成精简版决策仪表盘用于微信推送
-                wechat_dashboard = self.notifier.generate_wechat_dashboard(results)
-                logger.info(f"微信决策仪表盘长度: {len(wechat_dashboard)} 字符")
-                logger.debug(f"微信推送内容:\n{wechat_dashboard}")
+                # 生成精简版决策仪表盘用于推送
+                dashboard_content = self.notifier.generate_wechat_dashboard(results)
+                logger.info(f"决策仪表盘长度: {len(dashboard_content)} 字符")
+                logger.debug(f"推送内容:\n{dashboard_content}")
                 
-                success = self.notifier.send_to_wechat(wechat_dashboard)
+                success = self.notifier.send(dashboard_content)
                 if success:
                     logger.info("决策仪表盘推送成功")
                 else:
                     logger.warning("决策仪表盘推送失败")
             else:
-                logger.info("企业微信未配置，跳过推送")
+                logger.info("通知渠道未配置，跳过推送")
                 
         except Exception as e:
             logger.error(f"发送通知失败: {e}")
@@ -686,14 +686,12 @@ def run_market_review(notifier: NotificationService, analyzer=None, search_servi
         review_report = market_analyzer.run_daily_review()
         
         if review_report:
-            # 推送到微信
+            # 推送通知
             if notifier.is_available():
                 # 添加标题
-                wechat_report = f"## 🎯 大盘复盘\n\n{review_report}"
-                if len(wechat_report) > 3800:
-                    wechat_report = wechat_report[:3800] + "\n...(已截断)"
+                report_content = f"🎯 大盘复盘\n\n{review_report}"
                 
-                success = notifier.send_to_wechat(wechat_report)
+                success = notifier.send(report_content)
                 if success:
                     logger.info("大盘复盘推送成功")
                 else:
@@ -791,7 +789,7 @@ def main() -> int:
         # 模式1: 仅大盘复盘
         if args.market_review:
             logger.info("模式: 仅大盘复盘")
-            notifier = NotificationService(config.wechat_webhook_url)
+            notifier = NotificationService()
             
             # 初始化搜索服务和分析器（如果有配置）
             search_service = None
