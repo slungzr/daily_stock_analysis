@@ -133,6 +133,9 @@ jobs:
           # 自选股配置
           # ==========================================
           STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || '600519' }}
+          STOCK_LIST_SOURCE: ${{ vars.STOCK_LIST_SOURCE || secrets.STOCK_LIST_SOURCE || 'env' }}
+          WENCAI_STOCK_QUERY: ${{ vars.WENCAI_STOCK_QUERY || secrets.WENCAI_STOCK_QUERY || '昨日连板天梯，非st，主板，今日竞价涨幅大于2，昨日个股热度排名' }}
+          WENCAI_COOKIE: ${{ secrets.WENCAI_COOKIE || vars.WENCAI_COOKIE }}
           
           # ==========================================
           # 运行配置 ⬅️ 新增！
@@ -155,6 +158,11 @@ jobs:
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
           
         run: |
+          # 避免敏感信息在日志中泄露
+          if [ -n "$WENCAI_COOKIE" ]; then
+            echo "::add-mask::$WENCAI_COOKIE"
+          fi
+
           # 判断运行模式
           MODE="${{ github.event.inputs.mode || 'full' }}"
           
@@ -164,6 +172,7 @@ jobs:
           echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
           echo "🎯 运行模式: $MODE"
           echo "📊 自选股: $STOCK_LIST"
+          echo "🧭 选股来源: $STOCK_LIST_SOURCE"
           echo "📝 报告类型: $REPORT_TYPE"
           echo ""
           echo "=========================================="
@@ -176,6 +185,11 @@ jobs:
           echo "【搜索引擎】"
           echo "  Bocha API Keys: $([ -n "$BOCHA_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  Tavily API Keys: $([ -n "$TAVILY_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo ""
+          echo "【选股配置】"
+          echo "  STOCK_LIST_SOURCE: $STOCK_LIST_SOURCE"
+          echo "  WENCAI_STOCK_QUERY: $([ "$STOCK_LIST_SOURCE" = "wencai" ] && echo "$WENCAI_STOCK_QUERY" || echo '⚪ 未启用')"
+          echo "  WENCAI_COOKIE: $([ -n "$WENCAI_COOKIE" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo ""
           echo "【通知渠道】"
           echo "  PushPlus: $([ -n "$PUSHPLUS_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
