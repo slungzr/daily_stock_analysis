@@ -10,11 +10,18 @@ A股自选股智能分析系统 - 配置管理模块
 3. 提供类型安全的配置访问接口
 """
 
+import logging
 import os
+import re
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv, dotenv_values
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
+DEFAULT_WENCAI_STOCK_QUERY = "昨日连板天梯，非st，主板，今日竞价涨幅大于2，昨日个股热度排名"
 
 
 def setup_env():
@@ -41,6 +48,9 @@ class Config:
     
     # === 自选股配置 ===
     stock_list: List[str] = field(default_factory=list)
+    stock_list_source: str = "env"
+    wencai_stock_query: str = DEFAULT_WENCAI_STOCK_QUERY
+    wencai_cookie: Optional[str] = None
 
     # === 飞书云文档配置 ===
     feishu_app_id: Optional[str] = None
@@ -334,6 +344,9 @@ class Config:
         
         return cls(
             stock_list=stock_list,
+            stock_list_source=os.getenv('STOCK_LIST_SOURCE', 'env').strip().lower(),
+            wencai_stock_query=os.getenv('WENCAI_STOCK_QUERY', DEFAULT_WENCAI_STOCK_QUERY),
+            wencai_cookie=os.getenv('WENCAI_COOKIE'),
             feishu_app_id=os.getenv('FEISHU_APP_ID'),
             feishu_app_secret=os.getenv('FEISHU_APP_SECRET'),
             feishu_folder_token=os.getenv('FEISHU_FOLDER_TOKEN'),
@@ -454,8 +467,6 @@ class Config:
         if tushare_token:
             # Token configured but no explicit priority override
             # Prepend tushare so the paid source is tried first
-            import logging
-            logger = logging.getLogger(__name__)
             resolved = f'tushare,{default_priority}'
             logger.info(
                 f"TUSHARE_TOKEN detected, auto-injecting tushare into realtime priority: {resolved}"
@@ -463,6 +474,124 @@ class Config:
             return resolved
 
         return default_priority
+
+    @staticmethod
+    def _read_env_value(env_values: Dict[str, Any], key: str, default: str = '') -> str:
+        """Read setting with .env priority, then process env, then default."""
+        value = env_values.get(key) if env_values else None
+        if value in (None, ''):
+            value = os.getenv(key, default)
+        return str(value).strip() if value is not None else ''
+
+    @staticmethod
+    def _resolve_previous_trade_day(base_time: Optional[datetime] = None) -> str:
+        """Return previous weekday in YYYYMMDD format."""
+        current = base_time or datetime.now()
+        candidate = current - timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate -= timedelta(days=1)
+        return candidate.strftime('%Y%m%d')
+
+    @classmethod
+    def _build_wencai_query_candidates(cls, query_template: str) -> List[str]:
+        """Build candidate queries with date replacement and natural language fallback."""
+        template = (query_template or DEFAULT_WENCAI_STOCK_QUERY).strip()
+        if not template:
+            template = DEFAULT_WENCAI_STOCK_QUERY
+
+        today_str = datetime.now().strftime('%Y%m%d')
+        yesterday_str = cls._resolve_previous_trade_day()
+        dated_query = template.replace('昨日', yesterday_str).replace('今日', today_str)
+
+        query_candidates: List[str] = []
+        for query in (dated_query, template):
+            if query and query not in query_candidates:
+                query_candidates.append(query)
+        return query_candidates
+
+    @staticmethod
+    def _normalize_stock_code(raw_code: Any) -> str:
+        """Normalize stock code from pywencai output."""
+        if raw_code is None:
+            return ''
+
+        code = str(raw_code).strip().upper()
+        if not code or code in {'NAN', 'NONE'}:
+            return ''
+
+        if '.' in code:
+            code = code.split('.')[0]
+
+        code_match = re.search(r'(\d{6})', code)
+        if code_match:
+            return code_match.group(1)
+
+        return code
+
+    @classmethod
+    def _extract_codes_from_wencai_result(cls, result: Any) -> List[str]:
+        """Extract unique stock codes from pywencai dataframe-like result."""
+        if result is None or getattr(result, 'empty', True):
+            return []
+
+        columns = [str(col) for col in getattr(result, 'columns', [])]
+        if not columns:
+            return []
+
+        code_column = ''
+        for column in columns:
+            if column == '股票代码':
+                code_column = column
+                break
+        if not code_column:
+            for column in columns:
+                if '股票代码' in column:
+                    code_column = column
+                    break
+        if not code_column:
+            logger.warning("Unable to find stock code column in wencai result.")
+            return []
+
+        stock_codes: List[str] = []
+        seen_codes = set()
+        for _, row in result.iterrows():
+            code_raw = row.get(code_column, '') if hasattr(row, 'get') else row[code_column]
+            code = cls._normalize_stock_code(code_raw)
+            if code and code not in seen_codes:
+                stock_codes.append(code)
+                seen_codes.add(code)
+
+        return stock_codes
+
+    def _fetch_stock_list_from_wencai(self, query_template: str, cookie: Optional[str]) -> List[str]:
+        """Fetch stock list via pywencai with fallback queries."""
+        try:
+            import pywencai
+        except Exception as exc:
+            logger.warning(f"Failed to import pywencai: {exc}")
+            return []
+
+        for query in self._build_wencai_query_candidates(query_template):
+            start_time = time.time()
+            try:
+                if cookie:
+                    result = pywencai.get(query=query, cookie=cookie)
+                else:
+                    result = pywencai.get(query=query)
+                elapsed_time = time.time() - start_time
+                logger.info(f"Wencai stock query finished in {elapsed_time:.2f}s, query='{query}'")
+            except Exception as exc:
+                logger.warning(f"Wencai stock query failed, query='{query}', error={exc}")
+                continue
+
+            stock_codes = self._extract_codes_from_wencai_result(result)
+            if stock_codes:
+                logger.info(f"Wencai dynamic stock list loaded: {len(stock_codes)} stocks.")
+                return stock_codes
+
+            logger.warning(f"Wencai query returned empty stock list, query='{query}'")
+
+        return []
 
     @classmethod
     def reset_instance(cls) -> None:
@@ -481,15 +610,34 @@ class Config:
         # 也能获取到最新的股票列表配置
         env_file = os.getenv("ENV_FILE")
         env_path = Path(env_file) if env_file else (Path(__file__).parent.parent / '.env')
-        stock_list_str = ''
+        env_values: Dict[str, Any] = {}
         if env_path.exists():
             # 直接从 .env 文件读取最新的配置
             env_values = dotenv_values(env_path)
-            stock_list_str = (env_values.get('STOCK_LIST') or '').strip()
 
-        # 如果 .env 文件不存在或未配置，才尝试从系统环境变量读取
-        if not stock_list_str:
-            stock_list_str = os.getenv('STOCK_LIST', '')
+        stock_list_source = self._read_env_value(env_values, 'STOCK_LIST_SOURCE', self.stock_list_source).lower()
+        wencai_query = self._read_env_value(
+            env_values,
+            'WENCAI_STOCK_QUERY',
+            self.wencai_stock_query or DEFAULT_WENCAI_STOCK_QUERY
+        )
+        wencai_cookie = self._read_env_value(env_values, 'WENCAI_COOKIE', self.wencai_cookie or '')
+
+        if stock_list_source == 'wencai':
+            dynamic_stock_list = self._fetch_stock_list_from_wencai(
+                query_template=wencai_query,
+                cookie=wencai_cookie or None
+            )
+            if dynamic_stock_list:
+                self.stock_list_source = stock_list_source
+                self.wencai_stock_query = wencai_query
+                self.wencai_cookie = wencai_cookie or None
+                self.stock_list = dynamic_stock_list
+                return
+
+            logger.warning("Wencai dynamic stock list failed, falling back to STOCK_LIST.")
+
+        stock_list_str = self._read_env_value(env_values, 'STOCK_LIST', '')
 
         stock_list = [
             code.strip()
@@ -497,9 +645,12 @@ class Config:
             if code.strip()
         ]
 
-        if not stock_list:        
+        if not stock_list:
             stock_list = ['000001']
 
+        self.stock_list_source = stock_list_source
+        self.wencai_stock_query = wencai_query
+        self.wencai_cookie = wencai_cookie or None
         self.stock_list = stock_list
     
     def validate(self) -> List[str]:

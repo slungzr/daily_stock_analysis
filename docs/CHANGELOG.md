@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+- ✨ 支持 `STOCK_LIST_SOURCE=wencai` 动态自选股（基于 `WENCAI_STOCK_QUERY`）
+- 🛡️ 文财查询失败时自动回退到静态 `STOCK_LIST`
+
+### 文档
+- 📝 更新 `.env.example` 和 `README.md`，补充文财动态选股配置说明
+
 ## [3.0.5] - 2026-02-08
 
 ### 修复
